@@ -15,6 +15,13 @@ class SettingsConfig(BaseModel):
     db_path: str = Field(default="automator.db", description="Ruta a la base de datos SQLite")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO", description="Nivel de logging")
 
+    # Controles de seguridad
+    allow_shell_commands: bool = Field(default=False, description="Permite el uso de shell=True en comandos")
+    allowed_roots: Optional[List[str]] = Field(default=None, description="Lista de directorios raíz permitidos para operaciones de archivo")
+    allowed_webhook_domains: Optional[List[str]] = Field(default=None, description="Allowlist de dominios permitidos para webhooks")
+    allow_private_networks: bool = Field(default=False, description="Permite webhooks a IPs privadas/loopback (SSRF protection)")
+    task_lease_timeout_seconds: float = Field(default=300.0, ge=10.0, description="Segundos tras los cuales una tarea en PROCESSING se considera huérfana")
+
 
 class WatchConfig(BaseModel):
     path: str = Field(..., description="Ruta del directorio a monitorizar")
@@ -28,6 +35,8 @@ class ActionConfig(BaseModel):
     destination: Optional[str] = Field(default=None, description="Ruta de destino (soporta plantillas como {filename})")
     overwrite: bool = Field(default=True, description="Sobrescribir si el archivo destino existe")
     missing_ok: bool = Field(default=True, description="Ignorar si el archivo a borrar ya no existe")
+    allow_dir_overwrite: bool = Field(default=False, description="Permitir sobreescritura de directorios completos (rmtree)")
+    allow_dir_deletion: bool = Field(default=False, description="Permitir eliminación de directorios en local_delete")
 
     # Webhook
     url: Optional[str] = Field(default=None, description="URL del webhook HTTP")
@@ -37,9 +46,10 @@ class ActionConfig(BaseModel):
     timeout: float = Field(default=10.0, ge=0.5, description="Timeout en segundos para la petición")
 
     # Comando de sistema
-    cmd: Optional[str] = Field(default=None, description="Comando de consola a ejecutar (soporta variables)")
+    cmd: Optional[str] = Field(default=None, description="Comando de consola a ejecutar en modo texto")
+    args: Optional[List[str]] = Field(default=None, description="Lista segura de argumentos para ejecutar sin shell")
     check_returncode: bool = Field(default=True, description="Lanzar error si el código de retorno != 0")
-    shell: bool = Field(default=True, description="Ejecutar en contexto shell")
+    shell: bool = Field(default=False, description="Ejecutar en contexto shell (requiere allow_shell_commands=True)")
 
     @model_validator(mode="after")
     def validate_action_fields(self) -> ActionConfig:
@@ -47,8 +57,8 @@ class ActionConfig(BaseModel):
             raise ValueError(f"La acción '{self.type}' requiere el campo 'destination'.")
         if self.type == "webhook" and not self.url:
             raise ValueError("La acción 'webhook' requiere el campo 'url'.")
-        if self.type == "command" and not self.cmd:
-            raise ValueError("La acción 'command' requiere el campo 'cmd'.")
+        if self.type == "command" and not self.cmd and not self.args:
+            raise ValueError("La acción 'command' requiere el campo 'cmd' o 'args'.")
         return self
 
 

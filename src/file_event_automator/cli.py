@@ -345,15 +345,17 @@ def cmd_retry_failed(args):
         print(f"Error: {msg}", file=sys.stderr)
         sys.exit(1)
 
+    event_id = getattr(args, "event_id", None)
     db = TaskDatabase(db_path)
-    count = db.retry_failed_tasks()
+    count = db.retry_failed_tasks(event_id=event_id)
     db.close()
 
     print_output(
-        data={"status": "success", "retried_count": count},
+        data={"status": "success", "retried_count": count, "event_id": event_id},
         is_json=args.json,
         text_msg=f"[*] {count} tareas en estado FAILED fueron devueltas a PENDING con reintentos reiniciados."
     )
+
 
 
 def cmd_validate(args):
@@ -478,6 +480,7 @@ def main():
     # Subcomando: retry-failed
     p_retry = subparsers.add_parser("retry-failed", help="Reintenta tareas fallidas")
     p_retry.add_argument("--db", default="automator.db", help="Ruta a la base de datos (default: automator.db)")
+    p_retry.add_argument("--event-id", default=None, help="Reintentar solo tareas de un event_id específico")
     p_retry.add_argument("--json", action="store_true", help="Salida estructurada en formato JSON")
     p_retry.set_defaults(func=cmd_retry_failed)
 

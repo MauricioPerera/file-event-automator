@@ -11,7 +11,8 @@ from typing import Any, Dict
 def build_context(
     filepath: str,
     event_type: str = "created",
-    event_id: str = ""
+    event_id: str = "",
+    src_path: Optional[str] = None
 ) -> Dict[str, Any]:
     path = Path(filepath)
     now = datetime.now()
@@ -23,18 +24,23 @@ def build_context(
         except OSError:
             pass
 
+    resolved_src = str(Path(src_path).resolve()) if src_path else str(path.resolve())
+
     return {
         "filepath": str(path.resolve()),
         "filename": path.name,
         "stem": path.stem,
         "ext": path.suffix,
         "dir": str(path.parent.resolve()),
+        "src_path": resolved_src,
+        "src_filename": Path(resolved_src).name,
         "filesize": filesize,
         "event_type": event_type,
         "event_id": event_id,
         "timestamp": now.strftime("%Y%m%d_%H%M%S"),
         "iso_timestamp": now.isoformat(),
     }
+
 
 
 def interpolate_template(template: Any, context: Dict[str, Any]) -> Any:

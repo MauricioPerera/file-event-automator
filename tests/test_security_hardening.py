@@ -1,0 +1,281 @@
+from __future__ import annotations
+
+import subprocess
+import time
+from pathlib import Path
+from unittest.mock import MagicMock
+import pytest
+import requests_mock
+
+from file_event_automator.config import (
+    ActionConfig,
+    AutomatorConfig,
+    RuleConfig,
+    SettingsConfig,
+    WatchConfig,
+)
+from file_event_automator.db import TaskDatabase
+from file_event_automator.actions import (
+    build_context,
+    create_action,
+    LocalMoveAction,
+    LocalCopyAction,
+    LocalDeleteAction,
+    WebhookAction,
+    CommandAction,
+)
+from file_event_automator.engine import AutomatorEngine, FileAutomatorHandler
+from watchdog.events import FileMovedEvent
+
+
+# ==============================================================================
+# 1. TEST FIX: EVENTO MOVED DEBE EVALUAR dest_path
+# ==============================================================================
+
+def test_moved_event_evaluates_dest_path(tmp_path):
+    db_file = tmp_path / "moved_test.db"
+    db = TaskDatabase(db_file)
+    import threading
+    ev = threading.Event()
+
+    cfg = AutomatorConfig(
+        settings=SettingsConfig(debounce_seconds=0.01, stability_timeout=1.0, stability_check_interval=0.05),
+        watches=[WatchConfig(path=str(tmp_path))],
+        rules=[
+            RuleConfig(
+                name="DetectarRenombradoCSV",
+                events=["moved"],
+                patterns=["*.csv"],
+                actions=[
+                    ActionConfig(type="local_copy", destination=str(tmp_path / "copia_{filename}"))
+                ]
+            )
+        ]
+    )
+
+    handler = FileAutomatorHandler(cfg, db, ev)
+
+    # El archivo original era un .tmp y se renombra a un .csv
+    old_file = tmp_path / "temp_download.tmp"
+    new_file = tmp_path / "final_report.csv"
+    new_file.write_text("id,val\n1,100", encoding="utf-8")
+
+    event = FileMovedEvent(src_path=str(old_file), dest_path=str(new_file))
+    handler.on_moved(event)
+
+    # Esperar a que el worker de ingesta encole
+    deadline = time.time() + 2.0
+    task = None
+    while time.time() < deadline:
+        task = db.claim_next_task()
+        if task:
+            break
+        time.sleep(0.05)
+
+    assert task is not None, "El evento moved con destino *.csv debio activar la regla"
+    assert task.source_path == str(new_file.resolve())
+    assert task.src_path == str(old_file.resolve())
+    handler.shutdown()
+    db.close()
+
+
+# ==============================================================================
+# 2. TEST HARDENING: COMANDOS SEGUROS Y BLOQUEO DE SHELL
+# ==============================================================================
+
+def test_command_safe_args_execution(tmp_path):
+    """Comando ejecutado con lista de argumentos (sin shell) es inmune a inyeccion."""
+    test_file = tmp_path / "factura; rm -rf ;.txt"
+    test_file.write_text("datos seguros", encoding="utf-8")
+
+    ctx = build_context(str(test_file))
+    cmd_action = CommandAction(
+        args=["python", "-c", "import sys; print('ARG:', sys.argv[1])", "{filename}"],
+        shell=False
+    )
+    res = cmd_action.execute(ctx)
+    assert f"ARG: {test_file.name}" in res["last_command_stdout"]
+    assert res["last_command_returncode"] == 0
+
+
+def test_command_shell_blocked_without_permission():
+    """shell=True debe ser rechazado si allow_shell_commands=False."""
+    cmd_action = CommandAction(
+        cmd_template="echo hola",
+        shell=True,
+        allow_shell_commands=False
+    )
+    with pytest.raises(PermissionError) as exc:
+        cmd_action.execute({"filepath": "dummy"})
+    assert "shell=True bloqueada por seguridad" in str(exc.value)
+
+
+# ==============================================================================
+# 3. TEST HARDENING: PATH JAILING Y PROTECCION ANTI-RMTREE
+# ==============================================================================
+
+def test_local_action_path_jailing(tmp_path):
+    safe_zone = tmp_path / "safe"
+    safe_zone.mkdir()
+    danger_zone = tmp_path / "system_danger"
+    danger_zone.mkdir()
+
+    src = safe_zone / "doc.txt"
+    src.write_text("test", encoding="utf-8")
+
+    ctx = build_context(str(src))
+
+    # Intento de mover fuera de allowed_roots
+    action = LocalMoveAction(
+        destination_template=str(danger_zone / "{filename}"),
+        allowed_roots=[str(safe_zone)]
+    )
+
+    with pytest.raises(PermissionError) as exc:
+        action.execute(ctx)
+    assert "no está contenida en ninguna de las raíces permitidas" in str(exc.value)
+
+
+def test_local_action_refuse_dir_overwrite(tmp_path):
+    src = tmp_path / "algo.txt"
+    src.write_text("archivo", encoding="utf-8")
+
+    existing_dir = tmp_path / "carpeta_existente"
+    existing_dir.mkdir()
+    conflicting_dir = existing_dir / "algo.txt"
+    conflicting_dir.mkdir()
+
+    ctx = build_context(str(src))
+    action = LocalMoveAction(
+        destination_template=str(existing_dir),
+        overwrite=True,
+        allow_dir_overwrite=False
+    )
+
+    # Intento de sobreescribir un directorio existente sin permiso explícito
+    with pytest.raises(IsADirectoryError) as exc:
+        action.execute(ctx)
+    assert "es un directorio existente" in str(exc.value)
+    assert "allow_dir_overwrite: true" in str(exc.value)
+
+
+def test_local_delete_refuse_dir_deletion(tmp_path):
+    folder = tmp_path / "carpeta_peligrosa"
+    folder.mkdir()
+
+    ctx = {"filepath": str(folder)}
+    action = LocalDeleteAction(allow_dir_deletion=False)
+
+    with pytest.raises(IsADirectoryError) as exc:
+        action.execute(ctx)
+    assert "es un directorio" in str(exc.value)
+
+
+# ==============================================================================
+# 4. TEST HARDENING: PROTECCION SSRF Y CLAVE DE IDEMPOTENCIA
+# ==============================================================================
+
+def test_webhook_ssrf_blocked_localhost():
+    """Petición a localhost / 127.0.0.1 debe ser bloqueada por defecto."""
+    action = WebhookAction(
+        url_template="http://127.0.0.1:8080/internal-api",
+        allow_private_networks=False
+    )
+    with pytest.raises(PermissionError) as exc:
+        action.execute({"event_id": "evt-1"})
+    assert "Bloqueo SSRF" in str(exc.value)
+
+
+def test_webhook_domain_allowlist():
+    """Petición a dominio fuera de allowed_domains debe ser bloqueada."""
+    action = WebhookAction(
+        url_template="https://evil-server.com/steal-data",
+        allowed_domains=["empresa.com", "slack.com"]
+    )
+    with pytest.raises(PermissionError) as exc:
+        action.execute({"event_id": "evt-1"})
+    assert "Dominio 'evil-server.com' no permitido" in str(exc.value)
+
+
+def test_webhook_automatic_idempotency_header():
+    """Debe inyectar Idempotency-Key con {event_id}_{action_index} si no fue provisto."""
+    ctx = {"event_id": "evt-xyz-789", "action_index": 2}
+    with requests_mock.Mocker() as m:
+        m.post("https://api.empresa.com/webhook", json={"ok": True}, status_code=200)
+        action = WebhookAction(
+            url_template="https://api.empresa.com/webhook",
+            allowed_domains=["empresa.com"],
+            allow_private_networks=True
+        )
+        action.execute(ctx)
+
+        history = m.request_history
+        assert len(history) == 1
+        assert history[0].headers["Idempotency-Key"] == "evt-xyz-789_2"
+
+
+# ==============================================================================
+# 5. TEST HARDENING: LEASE TIMEOUT Y MULTI-DAEMON
+# ==============================================================================
+
+def test_recover_stuck_tasks_lease_timeout(tmp_path):
+    db_file = tmp_path / "lease.db"
+    db = TaskDatabase(db_file)
+
+    t_id = db.enqueue_task(
+        event_id="lease-evt",
+        rule_name="Regla",
+        event_type="created",
+        source_path="/tmp/doc.txt",
+        action_index=0,
+        action_type="command",
+        action_payload={"type": "command", "cmd": "echo 1"}
+    )
+
+    task = db.claim_next_task()
+    assert task.status == "PROCESSING"
+
+    # 1. Recuperación con lease_timeout=300s: la tarea acaba de ser reclamada (updated_at reciente), no debe recuperarse
+    recovered = db.recover_stuck_tasks(lease_timeout_seconds=300.0, force=False)
+    assert recovered == 0, "No debió recuperar tarea con lease activo"
+
+    # 2. Con force=True (o lease expirado): sí debe recuperarse
+    forced = db.recover_stuck_tasks(force=True)
+    assert forced == 1
+    stats = db.get_stats()
+    assert stats["PENDING"] == 1
+    db.close()
+
+
+# ==============================================================================
+# 6. TEST HARDENING: REINTENTOS MANUALES POR EVENT_ID
+# ==============================================================================
+
+def test_retry_failed_tasks_targeted_event_id(tmp_path):
+    db = TaskDatabase(tmp_path / "targeted_retry.db")
+
+    # Evento 1 que falló
+    db.enqueue_task("evt-1", "R1", "created", "/f1", 0, "cmd", {"type": "command", "cmd": "echo"}, max_retries=0)
+    t1 = db.claim_next_task()
+    db.fail_or_retry_task(t1.id, "error 1")
+
+    # Evento 2 que falló
+    db.enqueue_task("evt-2", "R2", "created", "/f2", 0, "cmd", {"type": "command", "cmd": "echo"}, max_retries=0)
+    t2 = db.claim_next_task()
+    db.fail_or_retry_task(t2.id, "error 2")
+
+    stats = db.get_stats()
+    assert stats["FAILED"] == 2
+
+    # Reintentar SOLO evt-1
+    count = db.retry_failed_tasks(event_id="evt-1")
+    assert count == 1
+
+    stats = db.get_stats()
+    assert stats["PENDING"] == 1
+    assert stats["FAILED"] == 1
+
+    # Verificar que la tarea que quedó PENDING es la de evt-1
+    pending_task = db.claim_next_task()
+    assert pending_task.event_id == "evt-1"
+    db.close()

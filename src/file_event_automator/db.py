@@ -25,6 +25,7 @@ class TaskRecord:
     error_message: Optional[str]
     created_at: str
     updated_at: str
+    src_path: Optional[str] = None
 
 
 class TaskDatabase:
@@ -55,6 +56,7 @@ class TaskDatabase:
                     rule_name TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     source_path TEXT NOT NULL,
+                    src_path TEXT,
                     action_index INTEGER NOT NULL,
                     action_type TEXT NOT NULL,
                     action_payload TEXT NOT NULL,
@@ -66,6 +68,12 @@ class TaskDatabase:
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            # Migración ligera: agregar columna src_path si no existe en tablas preexistentes
+            try:
+                conn.execute("ALTER TABLE task_queue ADD COLUMN src_path TEXT;")
+            except sqlite3.OperationalError:
+                pass
+
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tasks_status ON task_queue(status, id);
             """)
@@ -82,20 +90,22 @@ class TaskDatabase:
         action_index: int,
         action_type: str,
         action_payload: Dict[str, Any],
-        max_retries: int = 3
+        max_retries: int = 3,
+        src_path: Optional[str] = None
     ) -> int:
         conn = self._get_connection()
         payload_str = json.dumps(action_payload, ensure_ascii=False)
+        resolved_src = src_path or source_path
         with conn:
             cursor = conn.execute(
                 """
                 INSERT INTO task_queue (
-                    event_id, rule_name, event_type, source_path,
+                    event_id, rule_name, event_type, source_path, src_path,
                     action_index, action_type, action_payload, status, max_retries,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                 """,
-                (event_id, rule_name, event_type, source_path, action_index, action_type, payload_str, max_retries)
+                (event_id, rule_name, event_type, source_path, resolved_src, action_index, action_type, payload_str, max_retries)
             )
             return cursor.lastrowid
 
@@ -153,6 +163,7 @@ class TaskDatabase:
             )
 
             payload = json.loads(row["action_payload"])
+            src_val = row["src_path"] if "src_path" in row.keys() and row["src_path"] else row["source_path"]
             return TaskRecord(
                 id=row["id"],
                 event_id=row["event_id"],
@@ -167,7 +178,8 @@ class TaskDatabase:
                 max_retries=row["max_retries"],
                 error_message=row["error_message"],
                 created_at=row["created_at"],
-                updated_at=row["updated_at"]
+                updated_at=row["updated_at"],
+                src_path=src_val
             )
 
     def update_downstream_path(self, event_id: str, new_path: str) -> None:
@@ -244,30 +256,56 @@ class TaskDatabase:
 
             return will_retry
 
-    def recover_stuck_tasks(self) -> int:
-        """Recupera tareas que quedaron en PROCESSING debido a un apagón o crash."""
+    def recover_stuck_tasks(self, lease_timeout_seconds: Optional[float] = None, force: bool = False) -> int:
+        """
+        Recupera tareas que quedaron en PROCESSING debido a un apagón o crash.
+        Si lease_timeout_seconds se especifica (> 0), solo recupera tareas cuyo último
+        heartbeat o updated_at supera dicho lapso para no interferir con otros daemons concurrentes.
+        Si es None o se pasa force=True, recupera todas las tareas en PROCESSING.
+        """
         conn = self._get_connection()
         with conn:
-            cursor = conn.execute(
-                """
-                UPDATE task_queue 
-                SET status = 'PENDING', updated_at = CURRENT_TIMESTAMP 
-                WHERE status = 'PROCESSING'
-                """
-            )
+            if force or lease_timeout_seconds is None or lease_timeout_seconds <= 0:
+                cursor = conn.execute(
+                    """
+                    UPDATE task_queue 
+                    SET status = 'PENDING', updated_at = CURRENT_TIMESTAMP 
+                    WHERE status = 'PROCESSING'
+                    """
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE task_queue 
+                    SET status = 'PENDING', updated_at = CURRENT_TIMESTAMP 
+                    WHERE status = 'PROCESSING'
+                      AND (strftime('%s', 'now') - strftime('%s', updated_at)) > ?
+                    """,
+                    (int(lease_timeout_seconds),)
+                )
             return cursor.rowcount
 
-    def retry_failed_tasks(self) -> int:
-        """Devuelve todas las tareas FAILED al estado PENDING para reintento manual."""
+    def retry_failed_tasks(self, event_id: Optional[str] = None) -> int:
+        """Devuelve tareas FAILED al estado PENDING para reintento manual (global o por event_id)."""
         conn = self._get_connection()
         with conn:
-            cursor = conn.execute(
-                """
-                UPDATE task_queue 
-                SET status = 'PENDING', retries = 0, error_message = NULL, updated_at = CURRENT_TIMESTAMP 
-                WHERE status = 'FAILED'
-                """
-            )
+            if event_id:
+                cursor = conn.execute(
+                    """
+                    UPDATE task_queue 
+                    SET status = 'PENDING', retries = 0, error_message = NULL, updated_at = CURRENT_TIMESTAMP 
+                    WHERE status = 'FAILED' AND event_id = ?
+                    """,
+                    (event_id,)
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE task_queue 
+                    SET status = 'PENDING', retries = 0, error_message = NULL, updated_at = CURRENT_TIMESTAMP 
+                    WHERE status = 'FAILED'
+                    """
+                )
             return cursor.rowcount
 
     def get_stats(self) -> Dict[str, int]:
@@ -293,6 +331,7 @@ class TaskDatabase:
         if not row:
             return None
         payload = json.loads(row["action_payload"])
+        src_val = row["src_path"] if "src_path" in row.keys() and row["src_path"] else row["source_path"]
         return TaskRecord(
             id=row["id"],
             event_id=row["event_id"],
@@ -307,7 +346,8 @@ class TaskDatabase:
             max_retries=row["max_retries"],
             error_message=row["error_message"],
             created_at=row["created_at"],
-            updated_at=row["updated_at"]
+            updated_at=row["updated_at"],
+            src_path=src_val
         )
 
     def get_recent_tasks(self, limit: int = 10, status: Optional[str] = None) -> List[TaskRecord]:
@@ -325,6 +365,7 @@ class TaskDatabase:
         tasks = []
         for row in cursor.fetchall():
             payload = json.loads(row["action_payload"])
+            src_val = row["src_path"] if "src_path" in row.keys() and row["src_path"] else row["source_path"]
             tasks.append(TaskRecord(
                 id=row["id"],
                 event_id=row["event_id"],
@@ -339,7 +380,8 @@ class TaskDatabase:
                 max_retries=row["max_retries"],
                 error_message=row["error_message"],
                 created_at=row["created_at"],
-                updated_at=row["updated_at"]
+                updated_at=row["updated_at"],
+                src_path=src_val
             ))
         return tasks
 

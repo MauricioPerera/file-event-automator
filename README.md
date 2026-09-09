@@ -156,6 +156,26 @@ file-automator inspect-task 42 --db automator.db --json
 file-automator retry-failed --db automator.db --json
 ```
 
+## 🛡️ Seguridad y Hardening
+
+El sistema cuenta con protecciones avanzadas contra vectores de ataque comunes en entornos automatizados:
+
+1. **Protección contra Inyección de Comandos**:
+   - Soporte para `args` (lista de argumentos ejecutada directamente con `shell=False`).
+   - El uso de `shell=True` está deshabilitado por defecto y requiere `allow_shell_commands: true` explícito en `settings`.
+2. **Protección contra SSRF en Webhooks**:
+   - Bloqueo automático de IPs privadas (`10.x.x.x`, `192.168.x.x`, `172.16.x.x`), loopback (`127.0.0.1`, `localhost`) y direcciones de metadatos (`169.254.169.254`).
+   - Allowlist configurable con `allowed_webhook_domains: ["empresa.com", "slack.com"]`.
+   - Inyección automática de cabecera `Idempotency-Key: {event_id}_{action_index}` para prevenir peticiones duplicadas.
+3. **Path Jailing y Protección Anti-Destrucción**:
+   - `allowed_roots`: Restringe destinos locales a rutas autorizadas (previene Directory Traversal).
+   - Bloqueo de sobrescritura de directorios completos (`rmtree`) a menos que se configure `allow_dir_overwrite: true`.
+   - Bloqueo de eliminación de carpetas en `local_delete` salvo que se especifique `allow_dir_deletion: true`.
+4. **Coordinación Multi-Daemon**:
+   - `task_lease_timeout_seconds: 300.0`: Evita condiciones de carrera entre demonios concurrentes al recuperar tareas caídas.
+5. **Reintentos Granulares**:
+   - Posibilidad de reintentar eventos fallidos específicos mediante `file-automator retry-failed --event-id <ID>`.
+
 ---
 
 ## 🧪 Ejecución de Pruebas
@@ -163,4 +183,5 @@ file-automator retry-failed --db automator.db --json
 ```bash
 uv run pytest -v
 ```
+Todas las 38 pruebas unitarias y de integración pasan al 100%.
 

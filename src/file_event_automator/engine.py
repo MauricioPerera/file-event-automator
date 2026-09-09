@@ -68,7 +68,14 @@ class FileAutomatorHandler(FileSystemEventHandler):
         if event.is_directory:
             return
 
-        filepath = str(Path(event.src_path).resolve())
+        if event_type == "moved":
+            dest = getattr(event, "dest_path", None)
+            filepath = str(Path(dest).resolve()) if dest else str(Path(event.src_path).resolve())
+            src_path = str(Path(event.src_path).resolve())
+        else:
+            filepath = str(Path(event.src_path).resolve())
+            src_path = filepath
+
         if self._should_debounce(event_type, filepath):
             logger.debug(f"Debounced: {event_type} en {filepath}")
             return
@@ -79,11 +86,11 @@ class FileAutomatorHandler(FileSystemEventHandler):
             return
 
         # Enviar a pool de ingesta para estabilización y encolado en SQLite
-        self._ingest_pool.submit(self._ingest_file_event, filepath, event_type, matching_rules)
+        self._ingest_pool.submit(self._ingest_file_event, filepath, event_type, matching_rules, src_path)
 
-    def _ingest_file_event(self, filepath: str, event_type: str, rules: list[RuleConfig]):
-        # Si es creación o modificación, verificar estabilidad
-        if event_type in ("created", "modified"):
+    def _ingest_file_event(self, filepath: str, event_type: str, rules: list[RuleConfig], src_path: Optional[str] = None):
+        # Si es creación, modificación o movimiento, verificar estabilidad
+        if event_type in ("created", "modified", "moved"):
             ready = wait_for_file_ready(
                 filepath,
                 timeout=self.config.settings.stability_timeout,
@@ -105,7 +112,8 @@ class FileAutomatorHandler(FileSystemEventHandler):
                     action_index=idx,
                     action_type=action_cfg.type,
                     action_payload=action_cfg.model_dump(by_alias=True),
-                    max_retries=rule.max_retries
+                    max_retries=rule.max_retries,
+                    src_path=src_path
                 )
             self.task_trigger.set()
 
@@ -159,8 +167,13 @@ class AutomatorEngine:
 
             try:
                 action_cfg = ActionConfig.model_validate(task.action_payload)
-                action = create_action(action_cfg)
-                context = build_context(task.source_path, event_type=task.event_type, event_id=task.event_id)
+                action = create_action(action_cfg, settings=self.config.settings)
+                context = build_context(
+                    task.source_path,
+                    event_type=task.event_type,
+                    event_id=task.event_id,
+                    src_path=task.src_path
+                )
                 new_context = action.execute(context)
 
                 # Si la acción modificó la ruta (ej. local_move), propagar a tareas posteriores del mismo evento
@@ -181,10 +194,12 @@ class AutomatorEngine:
         logger.debug(f"Worker #{worker_id} finalizado.")
 
     def start(self):
-        # 1. Recuperar tareas que hayan quedado colgadas por caída previa
-        recovered = self.db.recover_stuck_tasks()
+        # 1. Recuperar tareas que hayan quedado colgadas por caída previa (respetando lease timeout)
+        recovered = self.db.recover_stuck_tasks(
+            lease_timeout_seconds=self.config.settings.task_lease_timeout_seconds
+        )
         if recovered > 0:
-            logger.info(f"Se recuperaron {recovered} tareas pendientes de ejecuciones anteriores.")
+            logger.info(f"Se recuperaron {recovered} tareas huérfanas de ejecuciones anteriores.")
             self.task_trigger.set()
 
         # 2. Configurar rutas de monitoreo en Watchdog
