@@ -1,0 +1,59 @@
+settings:
+  debounce_seconds: 0.5
+  stability_timeout: 3.0
+  stability_check_interval: 0.2
+  max_workers: 3
+  db_path: "demo/demo_automator.db"
+  log_level: "INFO"
+
+watches:
+  - path: "./demo/inbox"
+    recursive: false
+
+rules:
+  # Caso 1: CSV -> Analisis CLI + Webhook HTTP + Mover a 'processed/'
+  - name: "Procesamiento de Facturas CSV"
+    events: ["created"]
+    patterns: ["*.csv"]
+    ignore_patterns: ["*.tmp"]
+    max_retries: 2
+    actions:
+      - type: "command"
+        cmd: 'uv run python demo/scripts/analizar_csv.py "{filepath}"'
+        check_returncode: true
+
+      - type: "webhook"
+        url: "https://httpbin.org/post"
+        method: "POST"
+        headers:
+          Content-Type: "application/json"
+        json:
+          evento: "factura_ingresada"
+          archivo: "{filename}"
+          tamano_bytes: "{filesize}"
+          fecha: "{iso_timestamp}"
+
+      - type: "local_move"
+        destination: "./demo/processed/{filename}"
+        overwrite: true
+
+  # Caso 2: Imagenes -> Copiar a 'backup/' + Mover a 'catalog/' con timestamp
+  - name: "Clasificacion y Respaldo de Imagenes"
+    events: ["created"]
+    patterns: ["*.png", "*.jpg", "*.jpeg"]
+    max_retries: 2
+    actions:
+      - type: "local_copy"
+        destination: "./demo/backup/{filename}"
+        overwrite: true
+
+      - type: "local_move"
+        destination: "./demo/catalog/{stem}_{timestamp}{ext}"
+
+  # Caso 3: Auditoria de eliminacion en 'inbox'
+  - name: "Auditoria de Archivos Eliminados"
+    events: ["deleted"]
+    patterns: ["*"]
+    actions:
+      - type: "command"
+        cmd: 'cmd /c echo [ALERTA] Archivo eliminado: {filename} a las {timestamp} >> demo/auditoria_borrados.log'

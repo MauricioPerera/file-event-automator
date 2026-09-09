@@ -1,0 +1,28 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+
+# Virtual environments
+.venv/
+
+# Databases & Logs
+*.db
+*.db-shm
+*.db-wal
+*.log
+
+# Demo runtime folders
+demo/inbox/*
+demo/processed/*
+demo/backup/*
+demo/catalog/*
+!demo/inbox/.gitkeep
+!demo/processed/.gitkeep
+!demo/backup/.gitkeep
+!demo/catalog/.gitkeep
+

@@ -1,0 +1,57 @@
+settings:
+  debounce_seconds: 1.0
+  stability_timeout: 10.0
+  stability_check_interval: 0.2
+  max_workers: 4
+  db_path: "automator.db"
+  log_level: "INFO"
+
+watches:
+  - path: "./inbox"
+    recursive: false
+
+rules:
+  # Regla 1: Ingesta de CSVs -> Comando de análisis + Webhook de notificación + Mover a procesados
+  - name: "Ingesta y Notificación de CSV"
+    events: ["created", "modified"]
+    patterns: ["*.csv"]
+    ignore_patterns: ["*.tmp", "~*"]
+    max_retries: 2
+    actions:
+      - type: "command"
+        cmd: 'python -c "import sys; print(\"Analizando archivo:\", sys.argv[1])" "{filepath}"'
+        check_returncode: true
+      - type: "webhook"
+        url: "https://httpbin.org/post"
+        method: "POST"
+        headers:
+          Content-Type: "application/json"
+          X-Automator-Version: "1.0"
+        json:
+          event: "csv_arrived"
+          file_name: "{filename}"
+          file_size: "{filesize}"
+          timestamp: "{iso_timestamp}"
+      - type: "local_move"
+        destination: "./inbox/processed/{filename}"
+        overwrite: true
+
+  # Regla 2: Respaldo y organización de imágenes
+  - name: "Organizador de Imágenes"
+    events: ["created"]
+    patterns: ["*.png", "*.jpg", "*.jpeg"]
+    max_retries: 3
+    actions:
+      - type: "local_copy"
+        destination: "./backup/images/{filename}"
+        overwrite: true
+      - type: "local_move"
+        destination: "./catalog/{stem}_{timestamp}{ext}"
+
+  # Regla 3: Auditoría y alerta cuando se elimina un archivo
+  - name: "Alerta de Eliminación"
+    events: ["deleted"]
+    patterns: ["*"]
+    actions:
+      - type: "command"
+        cmd: "echo ALERTA: Se ha eliminado el archivo {filepath}"
