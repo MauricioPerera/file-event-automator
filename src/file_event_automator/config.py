@@ -31,7 +31,7 @@ class WatchConfig(BaseModel):
 
 
 class ActionConfig(BaseModel):
-    type: Literal["local_move", "local_copy", "local_delete", "webhook", "command"]
+    type: Literal["local_move", "local_copy", "local_delete", "webhook", "command", "deduplicate"]
 
     # Acciones locales
     destination: Optional[str] = Field(default=None, description="Ruta de destino (soporta plantillas como {filename})")
@@ -39,6 +39,11 @@ class ActionConfig(BaseModel):
     missing_ok: bool = Field(default=True, description="Ignorar si el archivo a borrar ya no existe")
     allow_dir_overwrite: bool = Field(default=False, description="Permitir sobreescritura de directorios completos (rmtree)")
     allow_dir_deletion: bool = Field(default=False, description="Permitir eliminación de directorios en local_delete")
+
+    # Deduplicación
+    hash_algorithm: Literal["sha256", "sha1"] = Field(default="sha256", description="Algoritmo para identificar contenido duplicado")
+    on_duplicate: Literal["ignore", "move", "delete"] = Field(default="ignore", description="Qué hacer cuando el hash ya existe")
+    duplicate_destination: Optional[str] = Field(default=None, description="Destino para duplicados cuando on_duplicate=move")
 
     # Webhook
     url: Optional[str] = Field(default=None, description="URL del webhook HTTP")
@@ -61,6 +66,8 @@ class ActionConfig(BaseModel):
             raise ValueError("La acción 'webhook' requiere el campo 'url'.")
         if self.type == "command" and not self.cmd and not self.args:
             raise ValueError("La acción 'command' requiere el campo 'cmd' o 'args'.")
+        if self.type == "deduplicate" and self.on_duplicate == "move" and not self.duplicate_destination:
+            raise ValueError("La acción 'deduplicate' con on_duplicate='move' requiere 'duplicate_destination'.")
         return self
 
 
@@ -75,6 +82,13 @@ class RuleConfig(BaseModel):
     max_retries: int = Field(default=3, ge=0, description="Número máximo de reintentos en caso de fallo")
     actions: List[ActionConfig] = Field(default_factory=list, description="Secuencia de acciones a ejecutar")
 
+    @model_validator(mode="after")
+    def validate_deduplicate_is_terminal(self) -> RuleConfig:
+        for index, action in enumerate(self.actions):
+            if action.type == "deduplicate" and index != len(self.actions) - 1:
+                raise ValueError("La acción 'deduplicate' debe ser la última acción de la regla.")
+        return self
+
 
 class AutomatorConfig(BaseModel):
     settings: SettingsConfig = Field(default_factory=SettingsConfig)
@@ -85,7 +99,7 @@ class AutomatorConfig(BaseModel):
     def validate_strict_security(self) -> AutomatorConfig:
         if self.settings.strict_mode:
             has_local_action = any(
-                a.type in ("local_move", "local_copy", "local_delete")
+                a.type in ("local_move", "local_copy", "local_delete", "deduplicate")
                 for r in self.rules
                 for a in r.actions
             )

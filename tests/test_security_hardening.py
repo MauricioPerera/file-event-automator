@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 import requests
 import requests_mock
+from pydantic import ValidationError
 
 from file_event_automator.config import (
     ActionConfig,
@@ -477,6 +478,47 @@ def test_old_lease_cannot_complete_task(tmp_path):
     assert db.complete_task(first.id, first.lease_id) is False
     assert db.complete_task(second.id, second.lease_id) is True
     db.close()
+
+
+def test_deduplicate_action_catalog_and_duplicate_move(tmp_path):
+    """Archivos con el mismo contenido se identifican aunque tengan nombres distintos."""
+    from file_event_automator.actions import DeduplicateAction
+
+    safe = tmp_path / "safe"
+    duplicates = safe / "duplicates"
+    safe.mkdir()
+    first = safe / "first.txt"
+    second = safe / "second.txt"
+    first.write_text("same content", encoding="utf-8")
+    second.write_text("same content", encoding="utf-8")
+    db = TaskDatabase(tmp_path / "catalog.db")
+    action = DeduplicateAction(
+        database=db,
+        allowed_roots=[str(safe)],
+        on_duplicate="move",
+        duplicate_destination=str(duplicates / "{filename}"),
+    )
+
+    first_ctx = action.execute(build_context(str(first)))
+    second_ctx = action.execute(build_context(str(second)))
+    assert first_ctx["duplicate"] is False
+    assert second_ctx["duplicate"] is True
+    assert second_ctx["duplicate_of"] == str(first.resolve())
+    assert not second.exists()
+    assert (duplicates / "second.txt").exists()
+    db.close()
+
+
+def test_deduplicate_must_be_terminal():
+    with pytest.raises(ValidationError) as exc:
+        RuleConfig(
+            name="invalid-dedupe",
+            actions=[
+                ActionConfig(type="deduplicate"),
+                ActionConfig(type="local_delete"),
+            ],
+        )
+    assert "debe ser la última" in str(exc.value)
 
 
 

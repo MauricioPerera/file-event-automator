@@ -93,6 +93,17 @@ class TaskDatabase:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_tasks_event ON task_queue(event_id, action_index);
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS file_catalog (
+                    hash_algorithm TEXT NOT NULL,
+                    file_hash TEXT NOT NULL,
+                    file_size INTEGER NOT NULL,
+                    first_path TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (hash_algorithm, file_hash)
+                );
+            """)
 
     def enqueue_task(
         self,
@@ -146,6 +157,28 @@ class TaskDatabase:
                 )
                 ids.append(cursor.lastrowid)
         return ids
+
+    def register_file_hash(self, file_hash: str, hash_algorithm: str, file_size: int, path: str) -> tuple[bool, Optional[str]]:
+        """Registra un hash de contenido y devuelve si ya existía y su primera ruta."""
+        conn = self._get_connection()
+        with conn:
+            cursor = conn.execute(
+                "INSERT OR IGNORE INTO file_catalog (hash_algorithm, file_hash, file_size, first_path) VALUES (?, ?, ?, ?)",
+                (hash_algorithm, file_hash, file_size, path),
+            )
+            if cursor.rowcount == 1:
+                return False, None
+            row = conn.execute(
+                "SELECT first_path FROM file_catalog WHERE hash_algorithm = ? AND file_hash = ?",
+                (hash_algorithm, file_hash),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE file_catalog SET last_seen_at = CURRENT_TIMESTAMP WHERE hash_algorithm = ? AND file_hash = ?",
+                    (hash_algorithm, file_hash),
+                )
+                return True, row["first_path"]
+            raise RuntimeError("No se pudo registrar ni recuperar el hash del archivo.")
 
     def claim_next_task(self) -> Optional[TaskRecord]:
         """

@@ -23,7 +23,12 @@ Sistema reactivo de automatización basado en eventos del sistema de archivos (`
      - `{event_type}`: Tipo de evento (`created`, `modified`, `deleted`, `moved`).
      - `{timestamp}`: Marca de tiempo formateada (`YYYYMMDD_HHMMSS`).
      - `{iso_timestamp}`: Marca de tiempo ISO-8601.
-4. **Persistencia y Resiliencia (SQLite)**:
+4. **Detección de duplicados por contenido**:
+   - Acción nativa `deduplicate` con SHA-256 por defecto (también permite SHA-1 por compatibilidad).
+   - Catálogo persistente en SQLite; archivos con nombres diferentes pero el mismo contenido se detectan igual.
+   - Comportamientos: ignorar (`ignore`), mover a una carpeta (`move`) o eliminar (`delete`).
+   - Debe ser la última acción de una regla para evitar procesar después un archivo duplicado.
+5. **Persistencia y Resiliencia (SQLite)**:
    - Cola de tareas transaccional en modo WAL.
    - Estados: `PENDING`, `PROCESSING`, `SUCCESS`, `FAILED`.
    - Reintentos automáticos configurables (`max_retries`).
@@ -112,6 +117,22 @@ rules:
         destination: "./inbox/processed/{filename}"
         overwrite: true
 ```
+
+### Ejemplo: detectar duplicados
+
+```yaml
+  - name: "Control de duplicados"
+    events: ["created"]
+    patterns: ["*.pdf"]
+    actions:
+      - type: "deduplicate"
+        hash_algorithm: "sha256"
+        on_duplicate: "move"
+        duplicate_destination: "./inbox/duplicados/{filename}"
+```
+
+El primer archivo se registra en el catálogo SQLite. Los siguientes archivos con el mismo contenido
+se mueven a `duplicados/` y conservan su nombre original.
 
 ## 🤖 Uso con Agentes de Inteligencia Artificial (AI Agents)
 
@@ -204,6 +225,20 @@ Copy-Item -Recurse skills/file-event-automator "$env:CODEX_HOME/skills/"
 Después el agente podrá usarla cuando el usuario pida configurar o ajustar automatizaciones de
 archivos.
 
+### Plugin para Codex
+
+El repositorio también es un plugin de Codex. El manifiesto está en
+`.codex-plugin/plugin.json` y empaqueta la skill anterior, por lo que el agente puede aprender el
+flujo de instalación, edición, validación y simulación desde el propio plugin.
+
+Para instalarlo desde una copia local del repositorio, añade la carpeta del proyecto como plugin
+local en tu entorno de Codex. Si solo necesitas la capacidad de la skill, también puedes copiar
+`skills/file-event-automator/` al directorio de skills del agente.
+
+El plugin no reemplaza la CLI: la CLI sigue siendo el motor ejecutable y el plugin aporta la capa
+de instrucciones y descubrimiento para que un usuario no técnico pueda pedir cambios en lenguaje
+natural y recibir una verificación antes de activar el flujo.
+
 ## 🛡️ Seguridad y Hardening
 
 El sistema cuenta con protecciones avanzadas contra vectores de ataque comunes en entornos automatizados:
@@ -231,5 +266,5 @@ El sistema cuenta con protecciones avanzadas contra vectores de ataque comunes e
 ```bash
 uv run pytest -v
 ```
-Todas las 38 pruebas unitarias y de integración pasan al 100%.
+Todas las pruebas unitarias y de integración pasan al 100%.
 

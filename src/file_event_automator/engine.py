@@ -191,7 +191,7 @@ class AutomatorEngine:
 
             try:
                 action_cfg = ActionConfig.model_validate(task.action_payload)
-                action = create_action(action_cfg, settings=self.config.settings)
+                action = create_action(action_cfg, settings=self.config.settings, db=self.db)
                 context = build_context(
                     task.source_path,
                     event_type=task.event_type,

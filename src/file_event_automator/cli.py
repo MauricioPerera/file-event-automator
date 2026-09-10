@@ -117,7 +117,7 @@ def cmd_list_rules(args):
                 print(f"    Patrones: {r.patterns} (Ignorar: {r.ignore_patterns})")
                 print(f"    Acciones: {len(r.actions)}")
                 for aidx, a in enumerate(r.actions, start=1):
-                    detail = a.destination or a.url or a.cmd or ""
+                    detail = a.destination or a.url or a.cmd or a.duplicate_destination or a.type
                     print(f"      {aidx}. {a.type} -> {detail}")
     except Exception as e:
         if args.json:
@@ -245,6 +245,11 @@ def cmd_test_event(args):
                         preview["cmd"] = interpolate_template(a.cmd, ctx)
                     if a.json_payload:
                         preview["json"] = interpolate_template(a.json_payload, ctx)
+                    if a.type == "deduplicate":
+                        preview["hash_algorithm"] = a.hash_algorithm
+                        preview["on_duplicate"] = a.on_duplicate
+                        if a.duplicate_destination:
+                            preview["duplicate_destination"] = interpolate_template(a.duplicate_destination, ctx)
                     action_previews.append(preview)
 
                 matched.append({

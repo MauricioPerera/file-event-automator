@@ -1,0 +1,37 @@
+{
+  "name": "file-event-automator",
+  "version": "0.1.0",
+  "description": "Create, validate, simulate, and run secure file automation workflows from Codex.",
+  "author": {
+    "name": "Mauricio Perera",
+    "url": "https://github.com/MauricioPerera"
+  },
+  "homepage": "https://github.com/MauricioPerera/file-event-automator",
+  "repository": "https://github.com/MauricioPerera/file-event-automator",
+  "license": "MIT",
+  "keywords": [
+    "files",
+    "automation",
+    "workflows",
+    "watcher",
+    "deduplication",
+    "security"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "File Event Automator",
+    "shortDescription": "Build secure file workflows from natural language.",
+    "longDescription": "Configure, inspect, validate, simulate, and activate file-event-automator workflows through Codex. The bundled skill guides agents through safe CLI usage, local file actions, webhooks, shell commands, and duplicate-file detection.",
+    "developerName": "Mauricio Perera",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Create a workflow for files arriving in Downloads.",
+      "Validate and simulate my file automation rules.",
+      "Find and handle duplicate files safely."
+    ]
+  }
+}

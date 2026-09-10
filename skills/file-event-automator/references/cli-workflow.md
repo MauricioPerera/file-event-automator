@@ -61,6 +61,23 @@ uv run file-automator test-event -c rules.yaml \
 Check `status`, `valid`, `security_warnings`, `matches_count`, and `action_previews`. A successful
 dry-run does not contact webhooks, execute commands, or move files.
 
+## Deduplicate files
+
+Use the native `deduplicate` action when the workflow should identify equal file contents, regardless
+of filename. SHA-256 is the default. The action must be the last action in its rule:
+
+```yaml
+actions:
+  - type: deduplicate
+    hash_algorithm: sha256
+    on_duplicate: move
+    duplicate_destination: ./duplicates/{filename}
+```
+
+The first occurrence is recorded in the SQLite file catalog. Later occurrences can be ignored, moved,
+or deleted. During verification, explain that hashing reads the complete file and that `test-event`
+only previews the rule; it does not calculate or register a hash.
+
 ## Control and troubleshooting
 
 ```bash
