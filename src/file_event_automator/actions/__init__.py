@@ -12,26 +12,30 @@ if TYPE_CHECKING:
 
 def create_action(cfg: ActionConfig, settings: Optional[SettingsConfig] = None) -> BaseAction:
     allowed_roots = settings.allowed_roots if settings else None
+    allow_symlinks = settings.allow_symlinks if settings else False
 
     if cfg.type == "local_move":
         return LocalMoveAction(
             destination_template=cfg.destination or "",
             overwrite=cfg.overwrite,
             allow_dir_overwrite=cfg.allow_dir_overwrite,
-            allowed_roots=allowed_roots
+            allowed_roots=allowed_roots,
+            allow_symlinks=allow_symlinks
         )
     elif cfg.type == "local_copy":
         return LocalCopyAction(
             destination_template=cfg.destination or "",
             overwrite=cfg.overwrite,
             allow_dir_overwrite=cfg.allow_dir_overwrite,
-            allowed_roots=allowed_roots
+            allowed_roots=allowed_roots,
+            allow_symlinks=allow_symlinks
         )
     elif cfg.type == "local_delete":
         return LocalDeleteAction(
             missing_ok=cfg.missing_ok,
             allow_dir_deletion=cfg.allow_dir_deletion,
-            allowed_roots=allowed_roots
+            allowed_roots=allowed_roots,
+            allow_symlinks=allow_symlinks
         )
     elif cfg.type == "webhook":
         return WebhookAction(

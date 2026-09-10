@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
+import requests
 import requests_mock
 
 from file_event_automator.config import (
@@ -386,5 +387,58 @@ def test_webhook_ssrf_anti_dns_rebinding(monkeypatch):
         action.execute({"filepath": "dummy"})
     assert "DNS Rebinding" in str(exc.value)
     assert "127.0.0.1" in str(exc.value)
+
+
+def test_webhook_trust_env_disabled_under_ssrf(monkeypatch):
+    """Verifica que requests.Session ignore proxies de entorno (trust_env=False) bajo protección SSRF."""
+    captured_trust_env = []
+    orig_request = requests.Session.request
+
+    def mock_request(self, *args, **kwargs):
+        captured_trust_env.append(self.trust_env)
+        return orig_request(self, *args, **kwargs)
+
+    monkeypatch.setattr(requests.Session, "request", mock_request)
+    with requests_mock.Mocker() as m:
+        m.post("https://api.empresa.com/wh", json={"ok": True})
+        action = WebhookAction(
+            url_template="https://api.empresa.com/wh",
+            allowed_domains=["empresa.com"],
+            allow_private_networks=False
+        )
+        action.execute({"filepath": "dummy"})
+
+    # Bajo allow_private_networks=False, trust_env debe ser False para ignorar proxies del entorno
+    assert len(captured_trust_env) == 1
+    assert captured_trust_env[0] is False
+
+
+def test_local_action_symlink_defense_blocked(tmp_path):
+    """Verifica que enlaces simbólicos en destino sean bloqueados cuando allowed_roots está activo."""
+    safe_zone = tmp_path / "safe"
+    safe_zone.mkdir()
+    danger_zone = tmp_path / "danger"
+    danger_zone.mkdir()
+
+    src = safe_zone / "doc.txt"
+    src.write_text("sensible", encoding="utf-8")
+
+    link = safe_zone / "symlink_trap"
+    try:
+        link.symlink_to(danger_zone, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Creación de symlinks no permitida sin privilegios elevados en este entorno")
+
+    ctx = build_context(str(src))
+    action = LocalMoveAction(
+        destination_template=str(link / "{filename}"),
+        allowed_roots=[str(safe_zone)],
+        allow_symlinks=False
+    )
+
+    with pytest.raises(PermissionError) as exc:
+        action.execute(ctx)
+    assert "Symlink Defense" in str(exc.value)
+
 
 

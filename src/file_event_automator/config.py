@@ -19,6 +19,7 @@ class SettingsConfig(BaseModel):
     strict_mode: bool = Field(default=False, description="Exige configuración explícita de allowed_roots y dominios de webhook")
     allow_shell_commands: bool = Field(default=False, description="Permite el uso de shell=True en comandos")
     allowed_roots: Optional[List[str]] = Field(default=None, description="Lista de directorios raíz permitidos para operaciones de archivo")
+    allow_symlinks: bool = Field(default=False, description="Permite el seguimiento de enlaces simbólicos bajo allowed_roots")
     allowed_webhook_domains: Optional[List[str]] = Field(default=None, description="Allowlist de dominios permitidos para webhooks")
     allow_private_networks: bool = Field(default=False, description="Permite webhooks a IPs privadas/loopback (SSRF protection)")
     task_lease_timeout_seconds: float = Field(default=300.0, ge=10.0, description="Segundos tras los cuales una tarea en PROCESSING se considera huérfana")

@@ -143,6 +143,7 @@ class WebhookAction(BaseAction):
         logger.info(f"Enviando Webhook {self.method} a {url} (Idempotency-Key: {headers['Idempotency-Key']})")
         session = requests.Session()
         if not self.allow_private_networks:
+            session.trust_env = False
             adapter = SSRFSafeAdapter()
             session.mount("http://", adapter)
             session.mount("https://", adapter)
