@@ -58,7 +58,10 @@ class LocalMoveAction(BaseAction):
         self.allow_symlinks = allow_symlinks
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        src = Path(context["filepath"]).resolve()
+        raw_src = Path(context["filepath"])
+        _verify_path_jailing(raw_src, self.allowed_roots, self.allow_symlinks)
+        src = raw_src.resolve()
+        _verify_path_jailing(src, self.allowed_roots, self.allow_symlinks)
         if not src.exists():
             raise FileNotFoundError(f"Archivo origen no encontrado para mover: {src}")
 
@@ -126,7 +129,10 @@ class LocalCopyAction(BaseAction):
         self.allow_symlinks = allow_symlinks
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        src = Path(context["filepath"]).resolve()
+        raw_src = Path(context["filepath"])
+        _verify_path_jailing(raw_src, self.allowed_roots, self.allow_symlinks)
+        src = raw_src.resolve()
+        _verify_path_jailing(src, self.allowed_roots, self.allow_symlinks)
         if not src.exists():
             raise FileNotFoundError(f"Archivo origen no encontrado para copiar: {src}")
 
@@ -184,7 +190,9 @@ class LocalDeleteAction(BaseAction):
         self.allow_symlinks = allow_symlinks
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
-        target = Path(context["filepath"]).resolve()
+        raw_target = Path(context["filepath"])
+        _verify_path_jailing(raw_target, self.allowed_roots, self.allow_symlinks)
+        target = raw_target.resolve()
         _verify_path_jailing(target, self.allowed_roots, self.allow_symlinks)
 
         if not target.exists():

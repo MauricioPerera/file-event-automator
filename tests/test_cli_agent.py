@@ -123,3 +123,34 @@ def test_cli_status_and_inspect_task_json(tmp_path):
     assert data_inspect["status"] == "success"
     assert data_inspect["task"]["id"] == tid
     assert data_inspect["task"]["rule_name"] == "ReglaCLI"
+
+
+def test_cli_actions_file_and_dry_run_do_not_write(tmp_path):
+    config_file = tmp_path / "rules.yaml"
+    actions_file = tmp_path / "actions.json"
+    actions_file.write_text(
+        json.dumps([{"type": "local_move", "destination": "./processed/{filename}"}]),
+        encoding="utf-8",
+    )
+    run_cli(["init", "-c", str(config_file), "--json"], cwd=tmp_path)
+    before = config_file.read_bytes()
+
+    planned = run_cli([
+        "add-rule", "-c", str(config_file), "--name", "Mover",
+        "--patterns", "*.csv", "--actions-file", str(actions_file),
+        "--dry-run", "--json"
+    ], cwd=tmp_path)
+    assert planned.returncode == 0
+    data = json.loads(planned.stdout)
+    assert data["schema_version"] == 1
+    assert data["status"] == "planned"
+    assert data["applied"] is False
+    assert config_file.read_bytes() == before
+
+    applied = run_cli([
+        "add-rule", "-c", str(config_file), "--name", "Mover",
+        "--patterns", "*.csv", "--actions-file", str(actions_file),
+        "--json"
+    ], cwd=tmp_path)
+    assert applied.returncode == 0
+    assert json.loads(applied.stdout)["applied"] is True

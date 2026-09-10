@@ -1,0 +1,4 @@
+interface:
+  display_name: "File Event Automator"
+  short_description: "Configure and verify file automations from the CLI"
+  default_prompt: "Configure or adjust a file automation workflow and verify it."

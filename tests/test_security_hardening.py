@@ -441,4 +441,42 @@ def test_local_action_symlink_defense_blocked(tmp_path):
     assert "Symlink Defense" in str(exc.value)
 
 
+def test_local_source_symlink_defense_blocked(tmp_path):
+    """Un symlink de origen no debe permitir leer o mover fuera de allowed_roots."""
+    safe_zone = tmp_path / "safe"
+    safe_zone.mkdir()
+    danger_zone = tmp_path / "danger"
+    danger_zone.mkdir()
+    outside = danger_zone / "secret.txt"
+    outside.write_text("secreto", encoding="utf-8")
+    source_link = safe_zone / "input.txt"
+    try:
+        source_link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("Creación de symlinks no permitida sin privilegios elevados en este entorno")
+
+    action = LocalCopyAction(
+        destination_template=str(safe_zone / "copy_{filename}"),
+        allowed_roots=[str(safe_zone)],
+        allow_symlinks=False,
+    )
+    with pytest.raises(PermissionError) as exc:
+        action.execute(build_context(str(source_link)))
+    assert "Symlink Defense" in str(exc.value)
+
+
+def test_old_lease_cannot_complete_task(tmp_path):
+    """Un worker cuyo lease fue reemplazado no puede completar la tarea."""
+    db = TaskDatabase(tmp_path / "lease_owner.db")
+    db.enqueue_task("evt", "R", "created", "/path", 0, "cmd", {"type": "command", "cmd": "echo"})
+    first = db.claim_next_task()
+    assert first is not None and first.lease_id
+    db.recover_stuck_tasks(force=True)
+    second = db.claim_next_task()
+    assert second is not None and second.lease_id != first.lease_id
+    assert db.complete_task(first.id, first.lease_id) is False
+    assert db.complete_task(second.id, second.lease_id) is True
+    db.close()
+
+
 

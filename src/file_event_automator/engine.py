@@ -70,10 +70,10 @@ class FileAutomatorHandler(FileSystemEventHandler):
 
         if event_type == "moved":
             dest = getattr(event, "dest_path", None)
-            filepath = str(Path(dest).resolve()) if dest else str(Path(event.src_path).resolve())
-            src_path = str(Path(event.src_path).resolve())
+            filepath = str(Path(dest).absolute()) if dest else str(Path(event.src_path).absolute())
+            src_path = str(Path(event.src_path).absolute())
         else:
-            filepath = str(Path(event.src_path).resolve())
+            filepath = str(Path(event.src_path).absolute())
             src_path = filepath
 
         if self._should_debounce(event_type, filepath):
@@ -103,18 +103,20 @@ class FileAutomatorHandler(FileSystemEventHandler):
         for rule in rules:
             event_id = uuid.uuid4().hex
             logger.info(f"Regla activada '{rule.name}' para evento {event_type} en {filepath} (ID: {event_id[:8]})")
-            for idx, action_cfg in enumerate(rule.actions):
-                self.db.enqueue_task(
-                    event_id=event_id,
-                    rule_name=rule.name,
-                    event_type=event_type,
-                    source_path=filepath,
-                    action_index=idx,
-                    action_type=action_cfg.type,
-                    action_payload=action_cfg.model_dump(by_alias=True),
-                    max_retries=rule.max_retries,
-                    src_path=src_path
-                )
+            self.db.enqueue_tasks([
+                {
+                    "event_id": event_id,
+                    "rule_name": rule.name,
+                    "event_type": event_type,
+                    "source_path": filepath,
+                    "src_path": src_path,
+                    "action_index": idx,
+                    "action_type": action_cfg.type,
+                    "action_payload": action_cfg.model_dump(by_alias=True),
+                    "max_retries": rule.max_retries,
+                }
+                for idx, action_cfg in enumerate(rule.actions)
+            ])
             self.task_trigger.set()
 
     def on_created(self, event):
@@ -130,7 +132,7 @@ class FileAutomatorHandler(FileSystemEventHandler):
         self._handle_event(event, "moved")
 
     def shutdown(self):
-        self._ingest_pool.shutdown(wait=False)
+        self._ingest_pool.shutdown(wait=True)
 
 
 class AutomatorEngine:
@@ -173,7 +175,7 @@ class AutomatorEngine:
             def _heartbeat_worker():
                 while not stop_hb.wait(timeout=hb_interval):
                     try:
-                        alive = self.db.heartbeat_task(task.id)
+                        alive = self.db.heartbeat_task(task.id, task.lease_id)
                         if not alive:
                             break
                         logger.debug(f"[Worker #{worker_id}] Heartbeat renovado para tarea #{task.id}")
@@ -203,12 +205,15 @@ class AutomatorEngine:
                 if new_context.get("filepath") and new_context["filepath"] != task.source_path:
                     self.db.update_downstream_path(task.event_id, new_context["filepath"])
 
-                self.db.complete_task(task.id)
-                logger.info(f"[Worker #{worker_id}] Acción #{task.action_index} completada con éxito (Tarea #{task.id})")
+                completed = self.db.complete_task(task.id, task.lease_id)
+                if not completed:
+                    logger.warning(f"[Worker #{worker_id}] Tarea #{task.id} perdió su lease antes de completarse")
+                else:
+                    logger.info(f"[Worker #{worker_id}] Acción #{task.action_index} completada con éxito (Tarea #{task.id})")
 
             except Exception as e:
                 logger.error(f"[Worker #{worker_id}] Error en Tarea #{task.id}: {e}")
-                will_retry = self.db.fail_or_retry_task(task.id, str(e))
+                will_retry = self.db.fail_or_retry_task(task.id, str(e), task.lease_id)
                 if will_retry:
                     logger.warning(f"Tarea #{task.id} reenviada a reintento (intento {task.retries + 1}/{task.max_retries})")
                 else:
@@ -248,13 +253,23 @@ class AutomatorEngine:
 
     def stop(self):
         logger.info("Deteniendo motor de automatización...")
-        self._running = False
-        self.task_trigger.set()
-
         self.observer.stop()
         self.observer.join(timeout=3.0)
 
+        # Esperar a que termine la estabilización/ingesta antes de detener workers.
         self.handler.shutdown()
+
+        # Drenar las tareas ya encoladas durante un periodo acotado.
+        self.task_trigger.set()
+        drain_deadline = time.time() + 30.0
+        while time.time() < drain_deadline:
+            stats = self.db.get_stats()
+            if stats["PENDING"] == 0 and stats["PROCESSING"] == 0:
+                break
+            time.sleep(0.1)
+
+        self._running = False
+        self.task_trigger.set()
 
         for t in self._workers:
             t.join(timeout=2.0)

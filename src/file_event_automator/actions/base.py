@@ -25,14 +25,15 @@ def build_context(
         except OSError:
             pass
 
-    resolved_src = str(Path(src_path).resolve()) if src_path else str(path.resolve())
+    absolute_path = path.absolute()
+    resolved_src = str(Path(src_path).absolute()) if src_path else str(absolute_path)
 
     return {
-        "filepath": str(path.resolve()),
+        "filepath": str(absolute_path),
         "filename": path.name,
         "stem": path.stem,
         "ext": path.suffix,
-        "dir": str(path.parent.resolve()),
+        "dir": str(path.parent.absolute()),
         "src_path": resolved_src,
         "src_filename": Path(resolved_src).name,
         "filesize": filesize,

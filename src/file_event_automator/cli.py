@@ -22,6 +22,28 @@ from .db import TaskDatabase
 from .engine import AutomatorEngine
 from .actions import build_context, interpolate_template
 
+CLI_SCHEMA_VERSION = 1
+
+
+def load_actions(args) -> list[dict[str, Any]]:
+    """Carga acciones desde inline JSON o desde un archivo UTF-8."""
+    if getattr(args, "actions_file", None):
+        raw = json.loads(Path(args.actions_file).read_text(encoding="utf-8"))
+    else:
+        raw = json.loads(args.actions)
+    if not isinstance(raw, list):
+        raise ValueError("Las acciones deben ser una lista JSON.")
+    return raw
+
+
+def structured_error(code: str, message: str) -> dict[str, Any]:
+    return {
+        "schema_version": CLI_SCHEMA_VERSION,
+        "status": "error",
+        "error_code": code,
+        "message": message,
+    }
+
 
 def setup_logging(level: str = "INFO"):
     logging.basicConfig(
@@ -113,11 +135,8 @@ def cmd_add_rule(args):
         else:
             config = AutomatorConfig()
 
-        # Parsear acciones desde JSON
-        actions_raw = json.loads(args.actions)
-        if not isinstance(actions_raw, list):
-            raise ValueError("El parámetro --actions debe ser una lista JSON de acciones.")
-
+        # Parsear acciones desde JSON inline o archivo
+        actions_raw = load_actions(args)
         actions = [ActionConfig.model_validate(a) for a in actions_raw]
 
         new_rule = RuleConfig(
@@ -133,12 +152,15 @@ def cmd_add_rule(args):
         config.rules = [r for r in config.rules if r.name != new_rule.name]
         config.rules.append(new_rule)
 
-        save_config(config, config_path)
+        if not args.dry_run:
+            save_config(config, config_path)
 
         print_output(
             data={
-                "status": "success",
-                "message": f"Regla '{new_rule.name}' agregada correctamente",
+                "schema_version": CLI_SCHEMA_VERSION,
+                "status": "planned" if args.dry_run else "success",
+                "applied": not args.dry_run,
+                "message": f"Regla '{new_rule.name}' {'previsualizada' if args.dry_run else 'agregada correctamente'}",
                 "rule_added": new_rule.name,
                 "rule": new_rule.model_dump(by_alias=True),
                 "total_rules": len(config.rules)
@@ -148,7 +170,7 @@ def cmd_add_rule(args):
         )
     except Exception as e:
         if args.json:
-            print(json.dumps({"status": "error", "message": str(e)}))
+            print(json.dumps(structured_error("ADD_RULE_FAILED", str(e)), ensure_ascii=False))
             sys.exit(1)
         print(f"[ERROR] Error al agregar regla: {e}", file=sys.stderr)
         sys.exit(1)
@@ -169,9 +191,10 @@ def cmd_remove_rule(args):
             print(f"[!] {msg}", file=sys.stderr)
             sys.exit(1)
 
-        save_config(config, config_path)
+        if not args.dry_run:
+            save_config(config, config_path)
         print_output(
-            data={"status": "success", "message": f"Regla '{args.name}' eliminada", "remaining_rules": len(config.rules)},
+            data={"schema_version": CLI_SCHEMA_VERSION, "status": "planned" if args.dry_run else "success", "applied": not args.dry_run, "message": f"Regla '{args.name}' {'previsualizada para eliminación' if args.dry_run else 'eliminada'}", "remaining_rules": len(config.rules)},
             is_json=args.json,
             text_msg=f"[OK] Regla '{args.name}' eliminada de '{config_path}'."
         )
@@ -260,7 +283,7 @@ def cmd_inspect_task(args):
     if not db_path.exists():
         msg = f"La base de datos '{db_path}' no existe."
         if args.json:
-            print(json.dumps({"status": "error", "message": msg}))
+            print(json.dumps(structured_error("RULE_NOT_FOUND", msg), ensure_ascii=False))
             sys.exit(1)
         print(f"[!] {msg}", file=sys.stderr)
         sys.exit(1)
@@ -462,7 +485,10 @@ def main():
     p_add.add_argument("--patterns", default="*", help="Patrones glob separados por coma (ej: *.csv,*.pdf)")
     p_add.add_argument("--ignore-patterns", default="", help="Patrones a ignorar separados por coma")
     p_add.add_argument("--max-retries", type=int, default=3, help="Reintentos máximos (default: 3)")
-    p_add.add_argument("--actions", required=True, help="Array JSON con las acciones a ejecutar")
+    actions_group = p_add.add_mutually_exclusive_group(required=True)
+    actions_group.add_argument("--actions", help="Array JSON con las acciones a ejecutar")
+    actions_group.add_argument("--actions-file", help="Archivo UTF-8 que contiene el array JSON de acciones")
+    p_add.add_argument("--dry-run", action="store_true", help="Previsualizar el cambio sin modificar el YAML")
     p_add.add_argument("--json", action="store_true", help="Salida estructurada en formato JSON")
     p_add.set_defaults(func=cmd_add_rule)
 
@@ -470,6 +496,7 @@ def main():
     p_rm = subparsers.add_parser("remove-rule", help="Elimina una regla por su nombre")
     p_rm.add_argument("-c", "--config", default="rules.yaml", help="Ruta al archivo YAML (default: rules.yaml)")
     p_rm.add_argument("--name", required=True, help="Nombre de la regla a eliminar")
+    p_rm.add_argument("--dry-run", action="store_true", help="Previsualizar la eliminación sin modificar el YAML")
     p_rm.add_argument("--json", action="store_true", help="Salida estructurada en formato JSON")
     p_rm.set_defaults(func=cmd_remove_rule)
 

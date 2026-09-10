@@ -156,6 +156,54 @@ file-automator inspect-task 42 --db automator.db --json
 file-automator retry-failed --db automator.db --json
 ```
 
+### Flujo recomendado para agentes
+
+Un agente puede preparar una automatización sin tocar el YAML directamente:
+
+```bash
+# 1. Guardar las acciones en un archivo JSON legible
+file-automator add-rule -c rules.yaml \
+  --name "Procesar facturas" \
+  --patterns "*.pdf" \
+  --actions-file actions.json \
+  --dry-run --json
+
+# 2. Aplicar la propuesta después de verificar la respuesta
+file-automator add-rule -c rules.yaml \
+  --name "Procesar facturas" \
+  --patterns "*.pdf" \
+  --actions-file actions.json \
+  --json
+
+# 3. Validar seguridad y estructura
+file-automator validate -c rules.yaml --json
+
+# 4. Simular un archivo real sin ejecutar acciones
+file-automator test-event -c rules.yaml \
+  --file "factura_001.pdf" --event created --json
+```
+
+`--actions-file` evita problemas de escape del JSON en la terminal. `--dry-run` devuelve
+`status: "planned"` y `applied: false`, por lo que un agente puede revisar el cambio
+antes de escribirlo. Las respuestas nuevas incluyen `schema_version: 1`; los errores de
+modificación incluyen un `error_code` estable.
+
+### Skill para agentes
+
+El repositorio incluye una skill reutilizable en [`skills/file-event-automator/`](skills/file-event-automator/).
+Permite que un agente conozca el flujo recomendado de instalación, configuración, validación y
+simulación sin tener que inferirlo desde el código.
+
+Para instalarla en un entorno Codex, copia esa carpeta al directorio de skills del agente, por
+ejemplo:
+
+```powershell
+Copy-Item -Recurse skills/file-event-automator "$env:CODEX_HOME/skills/"
+```
+
+Después el agente podrá usarla cuando el usuario pida configurar o ajustar automatizaciones de
+archivos.
+
 ## 🛡️ Seguridad y Hardening
 
 El sistema cuenta con protecciones avanzadas contra vectores de ataque comunes en entornos automatizados:

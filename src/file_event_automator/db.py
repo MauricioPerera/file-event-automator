@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ class TaskRecord:
     error_message: Optional[str]
     created_at: str
     updated_at: str
+    lease_id: Optional[str] = None
     src_path: Optional[str] = None
 
 
@@ -34,16 +36,22 @@ class TaskDatabase:
     def __init__(self, db_path: str | Path = "automator.db"):
         self.db_path = str(db_path)
         self._local = threading.local()
+        self._connections: set[sqlite3.Connection] = set()
+        self._connections_lock = threading.Lock()
         self.init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
         if not hasattr(self._local, "conn") or self._local.conn is None:
-            conn = sqlite3.connect(self.db_path, timeout=10.0)
+            # Cada hilo obtiene su propia conexión; check_same_thread=False permite
+            # cerrarlas de forma centralizada durante el apagado ordenado.
+            conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA busy_timeout=5000;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             self._local.conn = conn
+            with self._connections_lock:
+                self._connections.add(conn)
         return self._local.conn
 
     def init_db(self) -> None:
@@ -65,12 +73,17 @@ class TaskDatabase:
                     max_retries INTEGER NOT NULL DEFAULT 3,
                     error_message TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    lease_id TEXT
                 );
             """)
             # Migración ligera: agregar columna src_path si no existe en tablas preexistentes
             try:
                 conn.execute("ALTER TABLE task_queue ADD COLUMN src_path TEXT;")
+            except sqlite3.OperationalError:
+                pass
+            try:
+                conn.execute("ALTER TABLE task_queue ADD COLUMN lease_id TEXT;")
             except sqlite3.OperationalError:
                 pass
 
@@ -108,6 +121,31 @@ class TaskDatabase:
                 (event_id, rule_name, event_type, source_path, resolved_src, action_index, action_type, payload_str, max_retries)
             )
             return cursor.lastrowid
+
+    def enqueue_tasks(self, tasks: List[Dict[str, Any]]) -> List[int]:
+        """Inserta todas las acciones de un evento en una única transacción."""
+        conn = self._get_connection()
+        ids: List[int] = []
+        with conn:
+            for task in tasks:
+                payload_str = json.dumps(task["action_payload"], ensure_ascii=False)
+                cursor = conn.execute(
+                    """
+                    INSERT INTO task_queue (
+                        event_id, rule_name, event_type, source_path, src_path,
+                        action_index, action_type, action_payload, status, max_retries,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    """,
+                    (
+                        task["event_id"], task["rule_name"], task["event_type"],
+                        task["source_path"], task.get("src_path") or task["source_path"],
+                        task["action_index"], task["action_type"], payload_str,
+                        task.get("max_retries", 3),
+                    ),
+                )
+                ids.append(cursor.lastrowid)
+        return ids
 
     def claim_next_task(self) -> Optional[TaskRecord]:
         """
@@ -154,13 +192,14 @@ class TaskDatabase:
                     return None
 
                 task_id = row["id"]
+                lease_id = uuid.uuid4().hex
                 update_cursor = conn.execute(
                     """
                     UPDATE task_queue 
-                    SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP 
+                    SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP, lease_id = ?
                     WHERE id = ? AND status = 'PENDING'
                     """,
-                    (task_id,)
+                    (lease_id, task_id)
                 )
                 if update_cursor.rowcount > 0:
                     break
@@ -182,10 +221,11 @@ class TaskDatabase:
                 error_message=row["error_message"],
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
-                src_path=src_val
+                src_path=src_val,
+                lease_id=lease_id
             )
 
-    def heartbeat_task(self, task_id: int) -> bool:
+    def heartbeat_task(self, task_id: int, lease_id: Optional[str] = None) -> bool:
         """Actualiza updated_at de una tarea en PROCESSING para renovar su lease y evitar recuperación indebida."""
         conn = self._get_connection()
         with conn:
@@ -194,8 +234,9 @@ class TaskDatabase:
                 UPDATE task_queue
                 SET updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND status = 'PROCESSING'
+                  AND (? IS NULL OR lease_id = ?)
                 """,
-                (task_id,)
+                (task_id, lease_id, lease_id)
             )
             return cursor.rowcount > 0
 
@@ -212,19 +253,21 @@ class TaskDatabase:
                 (new_path, event_id)
             )
 
-    def complete_task(self, task_id: int) -> None:
+    def complete_task(self, task_id: int, lease_id: Optional[str] = None) -> bool:
         conn = self._get_connection()
         with conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE task_queue 
-                SET status = 'SUCCESS', error_message = NULL, updated_at = CURRENT_TIMESTAMP 
-                WHERE id = ?
+                SET status = 'SUCCESS', error_message = NULL, updated_at = CURRENT_TIMESTAMP, lease_id = NULL
+                WHERE id = ? AND status = 'PROCESSING'
+                  AND (? IS NULL OR lease_id = ?)
                 """,
-                (task_id,)
+                (task_id, lease_id, lease_id)
             )
+            return cursor.rowcount > 0
 
-    def fail_or_retry_task(self, task_id: int, error: str) -> bool:
+    def fail_or_retry_task(self, task_id: int, error: str, lease_id: Optional[str] = None) -> bool:
         """
         Incrementa los reintentos. Si supera max_retries, pasa a FAILED.
         Devuelve True si volverá a reintentarse (PENDING), False si quedó en FAILED.
@@ -232,7 +275,7 @@ class TaskDatabase:
         conn = self._get_connection()
         with conn:
             cursor = conn.execute(
-                """SELECT retries, max_retries, event_id FROM task_queue WHERE id = ?""", (task_id,)
+                """SELECT retries, max_retries, event_id, lease_id FROM task_queue WHERE id = ? AND status = 'PROCESSING' AND (? IS NULL OR lease_id = ?)""", (task_id, lease_id, lease_id)
             )
             row = cursor.fetchone()
             if not row:
@@ -252,7 +295,7 @@ class TaskDatabase:
             conn.execute(
                 """
                 UPDATE task_queue 
-                SET status = ?, retries = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP 
+                SET status = ?, retries = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP, lease_id = NULL
                 WHERE id = ?
                 """,
                 (status, retries, str(error), task_id)
@@ -403,7 +446,13 @@ class TaskDatabase:
         return tasks
 
     def close(self) -> None:
-        if hasattr(self._local, "conn") and self._local.conn is not None:
-            self._local.conn.close()
-            self._local.conn = None
+        with self._connections_lock:
+            connections = list(self._connections)
+            self._connections.clear()
+        for conn in connections:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+        self._local.conn = None
 
