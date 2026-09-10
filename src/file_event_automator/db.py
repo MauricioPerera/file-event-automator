@@ -132,22 +132,7 @@ class TaskDatabase:
                 """
             )
 
-            # 2. Buscar la siguiente tarea ejecutable
-            cursor = conn.execute(
-                """
-                SELECT * FROM task_queue t
-                WHERE t.status = 'PENDING'
-                  AND (
-                      t.action_index = 0
-                      OR (
-                          SELECT prev.status FROM task_queue prev
-                          WHERE prev.event_id = t.event_id AND prev.action_index = t.action_index - 1
-                      ) = 'SUCCESS'
-                  )
-                ORDER BY t.id ASC
-                LIMIT 1
-                """
-            )
+            # 2. Buscar la siguiente tarea ejecutable y reclamarla atómicamente
             while True:
                 cursor = conn.execute(
                     """

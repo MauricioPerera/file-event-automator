@@ -366,3 +366,25 @@ def test_strict_mode_validation():
         AutomatorConfig.model_validate(cfg_dict)
     assert "strict_mode activado" in str(exc.value)
 
+
+def test_webhook_ssrf_anti_dns_rebinding(monkeypatch):
+    """Simula ataque de DNS rebinding donde el host parece público al inicio pero el socket conecta a 127.0.0.1."""
+    class MockSocket:
+        def getpeername(self):
+            return ("127.0.0.1", 80)
+        def close(self):
+            pass
+
+    from urllib3.connection import HTTPConnection
+    monkeypatch.setattr(HTTPConnection, "_new_conn", lambda self: MockSocket())
+
+    action = WebhookAction(
+        url_template="http://api.test/rebinding-attack",
+        allow_private_networks=False
+    )
+    with pytest.raises(PermissionError) as exc:
+        action.execute({"filepath": "dummy"})
+    assert "DNS Rebinding" in str(exc.value)
+    assert "127.0.0.1" in str(exc.value)
+
+

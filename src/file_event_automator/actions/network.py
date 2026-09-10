@@ -6,9 +6,54 @@ import socket
 from urllib.parse import urlsplit
 from typing import Any, Dict, List, Optional
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.connectionpool import HTTPConnectionPool, HTTPSConnectionPool
 from .base import BaseAction, interpolate_template
 
 logger = logging.getLogger("file_event_automator.actions.network")
+
+
+class _SSRFSafeHTTPConnection(HTTPConnection):
+    def _new_conn(self):
+        sock = super()._new_conn()
+        peer_ip = sock.getpeername()[0]
+        ip = ipaddress.ip_address(peer_ip)
+        if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+            sock.close()
+            raise PermissionError(
+                f"Bloqueo SSRF / DNS Rebinding: Conexión establecida a IP privada rechazada ({peer_ip})"
+            )
+        return sock
+
+
+class _SSRFSafeHTTPSConnection(HTTPSConnection):
+    def _new_conn(self):
+        sock = super()._new_conn()
+        peer_ip = sock.getpeername()[0]
+        ip = ipaddress.ip_address(peer_ip)
+        if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+            sock.close()
+            raise PermissionError(
+                f"Bloqueo SSRF / DNS Rebinding: Conexión establecida a IP privada rechazada ({peer_ip})"
+            )
+        return sock
+
+
+class _SSRFSafeHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _SSRFSafeHTTPConnection
+
+
+class _SSRFSafeHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _SSRFSafeHTTPSConnection
+
+
+class SSRFSafeAdapter(HTTPAdapter):
+    """Adaptador HTTP que intercepta sockets TCP para bloquear IPs privadas post-resolución (Anti-Rebinding)."""
+    def init_poolmanager(self, *args, **kwargs):
+        super().init_poolmanager(*args, **kwargs)
+        self.poolmanager.pool_classes_by_scheme["http"] = _SSRFSafeHTTPConnectionPool
+        self.poolmanager.pool_classes_by_scheme["https"] = _SSRFSafeHTTPSConnectionPool
 
 
 class WebhookAction(BaseAction):
@@ -96,16 +141,47 @@ class WebhookAction(BaseAction):
             headers["Idempotency-Key"] = f"{event_id}_{action_idx}"
 
         logger.info(f"Enviando Webhook {self.method} a {url} (Idempotency-Key: {headers['Idempotency-Key']})")
-        resp = requests.request(
-            method=self.method,
-            url=url,
-            headers=headers,
-            json=json_data,
-            timeout=self.timeout
-        )
+        session = requests.Session()
+        if not self.allow_private_networks:
+            adapter = SSRFSafeAdapter()
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
 
-        resp.raise_for_status()
-        logger.info(f"Webhook {url} respondió exitosamente (HTTP {resp.status_code})")
-        context["last_webhook_status"] = resp.status_code
-        return context
+        try:
+            resp = session.request(
+                method=self.method,
+                url=url,
+                headers=headers,
+                json=json_data,
+                timeout=self.timeout
+            )
+            resp.raise_for_status()
+            logger.info(f"Webhook {url} respondió exitosamente (HTTP {resp.status_code})")
+            context["last_webhook_status"] = resp.status_code
+            return context
+        except requests.exceptions.ConnectionError as ce:
+            # Desempaquetar PermissionError si se originó en el adaptador anti-rebinding
+            cur: Any = ce
+            while cur is not None:
+                if isinstance(cur, PermissionError):
+                    raise cur
+                if getattr(cur, "__cause__", None) and isinstance(cur.__cause__, PermissionError):
+                    raise cur.__cause__
+                found = False
+                for arg in getattr(cur, "args", ()):
+                    if isinstance(arg, PermissionError):
+                        raise arg
+                    if isinstance(arg, tuple):
+                        for subarg in arg:
+                            if isinstance(subarg, PermissionError):
+                                raise subarg
+                    if isinstance(arg, Exception):
+                        cur = arg
+                        found = True
+                        break
+                if not found:
+                    break
+            raise
+        finally:
+            session.close()
 

@@ -78,6 +78,7 @@ class LocalMoveAction(BaseAction):
                 raise FileExistsError(f"El archivo destino ya existe y overwrite=False: {dest}")
 
         shutil.move(str(src), str(dest))
+        _verify_path_jailing(dest, self.allowed_roots)
         logger.info(f"Movido: {src} -> {dest}")
 
         # Actualizar contexto con la nueva ruta
@@ -140,6 +141,7 @@ class LocalCopyAction(BaseAction):
         else:
             shutil.copy2(str(src), str(dest))
 
+        _verify_path_jailing(dest, self.allowed_roots)
         logger.info(f"Copiado: {src} -> {dest}")
         return context
 
