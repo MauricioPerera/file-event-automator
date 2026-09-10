@@ -362,13 +362,26 @@ def cmd_validate(args):
     config_path = Path(args.config)
     try:
         config = load_config(config_path)
+        security_warnings = []
+        if config.settings.allowed_roots is None:
+            security_warnings.append("allowed_roots no está configurado: las acciones locales no tienen restricción de rutas (Path Jailing inactivo).")
+        if config.settings.allowed_webhook_domains is None:
+            has_webhooks = any(a.type == "webhook" for r in config.rules for a in r.actions)
+            if has_webhooks:
+                security_warnings.append("allowed_webhook_domains no está configurado: los webhooks pueden enviar peticiones a cualquier dominio público.")
+        if config.settings.allow_shell_commands:
+            security_warnings.append("allow_shell_commands está activado: los comandos pueden ejecutarse en shell del sistema.")
+        if config.settings.allow_private_networks:
+            security_warnings.append("allow_private_networks está activado: la protección contra SSRF para IPs privadas está deshabilitada.")
+
         data = {
             "status": "success",
             "valid": True,
             "config_path": str(config_path),
             "watches": [w.model_dump() for w in config.watches],
             "rules_count": len(config.rules),
-            "settings": config.settings.model_dump()
+            "settings": config.settings.model_dump(),
+            "security_warnings": security_warnings
         }
         if args.json:
             print(json.dumps(data, indent=2, ensure_ascii=False))
@@ -380,6 +393,10 @@ def cmd_validate(args):
             print(f"  - Reglas definidas: {len(config.rules)}")
             for r in config.rules:
                 print(f"    * '{r.name}' -> Eventos: {r.events}, Patrones: {r.patterns}, Acciones: {len(r.actions)}")
+            if security_warnings:
+                print(f"  - Advertencias de Seguridad ({len(security_warnings)}):")
+                for w in security_warnings:
+                    print(f"    [!] {w}")
     except Exception as e:
         if args.json:
             print(json.dumps({"status": "error", "valid": False, "message": str(e)}))

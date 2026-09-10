@@ -68,6 +68,8 @@ class WebhookAction(BaseAction):
 
             try:
                 addr_info = socket.getaddrinfo(hostname, None)
+                if not addr_info:
+                    raise ConnectionError(f"Bloqueo SSRF: No se obtuvieron direcciones para '{hostname}'.")
                 for info in addr_info:
                     ip_str = info[4][0]
                     ip = ipaddress.ip_address(ip_str)
@@ -75,10 +77,10 @@ class WebhookAction(BaseAction):
                         raise PermissionError(
                             f"Bloqueo SSRF: Petición a dirección IP interna o privada ({ip_str}) rechazada."
                         )
-            except socket.gaierror:
-                # Si el host no resuelve en DNS (p.ej. offline o mocks de requests),
-                # se permite continuar para que requests o su adapter gestione la conexión o el mock.
-                pass
+            except socket.gaierror as e:
+                raise ConnectionError(
+                    f"Bloqueo SSRF (Fail-Closed): No se pudo resolver de forma segura el host '{hostname}': {e}"
+                )
 
     def execute(self, context: Dict[str, Any]) -> Dict[str, Any]:
         url = interpolate_template(self.url_template, context)

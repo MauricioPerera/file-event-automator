@@ -148,19 +148,37 @@ class TaskDatabase:
                 LIMIT 1
                 """
             )
-            row = cursor.fetchone()
-            if not row:
-                return None
+            while True:
+                cursor = conn.execute(
+                    """
+                    SELECT t.* FROM task_queue t
+                    WHERE t.status = 'PENDING'
+                      AND (
+                          t.action_index = 0
+                          OR (
+                              SELECT prev.status FROM task_queue prev
+                              WHERE prev.event_id = t.event_id AND prev.action_index = t.action_index - 1
+                          ) = 'SUCCESS'
+                      )
+                    ORDER BY t.id ASC
+                    LIMIT 1
+                    """
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
 
-            task_id = row["id"]
-            conn.execute(
-                """
-                UPDATE task_queue 
-                SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP 
-                WHERE id = ? AND status = 'PENDING'
-                """,
-                (task_id,)
-            )
+                task_id = row["id"]
+                update_cursor = conn.execute(
+                    """
+                    UPDATE task_queue 
+                    SET status = 'PROCESSING', updated_at = CURRENT_TIMESTAMP 
+                    WHERE id = ? AND status = 'PENDING'
+                    """,
+                    (task_id,)
+                )
+                if update_cursor.rowcount > 0:
+                    break
 
             payload = json.loads(row["action_payload"])
             src_val = row["src_path"] if "src_path" in row.keys() and row["src_path"] else row["source_path"]
@@ -181,6 +199,20 @@ class TaskDatabase:
                 updated_at=row["updated_at"],
                 src_path=src_val
             )
+
+    def heartbeat_task(self, task_id: int) -> bool:
+        """Actualiza updated_at de una tarea en PROCESSING para renovar su lease y evitar recuperación indebida."""
+        conn = self._get_connection()
+        with conn:
+            cursor = conn.execute(
+                """
+                UPDATE task_queue
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND status = 'PROCESSING'
+                """,
+                (task_id,)
+            )
+            return cursor.rowcount > 0
 
     def update_downstream_path(self, event_id: str, new_path: str) -> None:
         """Actualiza la ruta del archivo para las acciones pendientes del mismo evento (ej: tras moverlo)."""

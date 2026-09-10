@@ -165,6 +165,28 @@ class AutomatorEngine:
                 f"de regla '{task.rule_name}' para {task.source_path}"
             )
 
+            # Iniciar heartbeat en segundo plano para renovar el lease durante ejecuciones prolongadas
+            stop_hb = threading.Event()
+            lease_timeout = self.config.settings.task_lease_timeout_seconds
+            hb_interval = max(1.0, min(15.0, lease_timeout / 3.0))
+
+            def _heartbeat_worker():
+                while not stop_hb.wait(timeout=hb_interval):
+                    try:
+                        alive = self.db.heartbeat_task(task.id)
+                        if not alive:
+                            break
+                        logger.debug(f"[Worker #{worker_id}] Heartbeat renovado para tarea #{task.id}")
+                    except Exception as hb_err:
+                        logger.warning(f"[Worker #{worker_id}] Error en heartbeat tarea #{task.id}: {hb_err}")
+
+            hb_thread = threading.Thread(
+                target=_heartbeat_worker,
+                daemon=True,
+                name=f"HB-Task-{task.id}"
+            )
+            hb_thread.start()
+
             try:
                 action_cfg = ActionConfig.model_validate(task.action_payload)
                 action = create_action(action_cfg, settings=self.config.settings)
@@ -172,6 +194,7 @@ class AutomatorEngine:
                     task.source_path,
                     event_type=task.event_type,
                     event_id=task.event_id,
+                    action_index=task.action_index,
                     src_path=task.src_path
                 )
                 new_context = action.execute(context)
@@ -190,6 +213,9 @@ class AutomatorEngine:
                     logger.warning(f"Tarea #{task.id} reenviada a reintento (intento {task.retries + 1}/{task.max_retries})")
                 else:
                     logger.error(f"Tarea #{task.id} falló definitivamente tras superar reintentos máximos.")
+            finally:
+                stop_hb.set()
+                hb_thread.join(timeout=1.0)
 
         logger.debug(f"Worker #{worker_id} finalizado.")
 

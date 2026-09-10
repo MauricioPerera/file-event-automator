@@ -279,3 +279,90 @@ def test_retry_failed_tasks_targeted_event_id(tmp_path):
     pending_task = db.claim_next_task()
     assert pending_task.event_id == "evt-1"
     db.close()
+
+
+# ==============================================================================
+# 7. TEST HARDENING V2: VALIDACIONES PREVENTIVAS Y FAIL-CLOSED
+# ==============================================================================
+
+def test_path_jailing_rejects_before_creating_dirs(tmp_path):
+    """Verifica que rutas no permitidas se rechacen ANTES de crear cualquier carpeta en disco."""
+    safe_zone = tmp_path / "safe"
+    safe_zone.mkdir()
+    src = safe_zone / "data.txt"
+    src.write_text("datos", encoding="utf-8")
+
+    unauthorized_parent = tmp_path / "evil_dir" / "nested"
+    assert not (tmp_path / "evil_dir").exists()
+
+    ctx = build_context(str(src))
+    action = LocalMoveAction(
+        destination_template=str(unauthorized_parent / "{filename}"),
+        allowed_roots=[str(safe_zone)]
+    )
+
+    with pytest.raises(PermissionError):
+        action.execute(ctx)
+
+    # La carpeta no debe haberse creado en disco
+    assert not (tmp_path / "evil_dir").exists()
+
+
+def test_task_lease_heartbeat(tmp_path):
+    """Verifica que el heartbeat actualice el lease de una tarea en PROCESSING."""
+    db = TaskDatabase(tmp_path / "hb.db")
+    db.enqueue_task("evt-hb", "R", "created", "/path", 0, "cmd", {"type": "command", "cmd": "echo"})
+    t = db.claim_next_task()
+    assert t is not None
+
+    time.sleep(1.0)
+    ok = db.heartbeat_task(t.id)
+    assert ok is True
+
+    refreshed = db.get_task(t.id)
+    assert refreshed.updated_at >= t.updated_at
+    db.close()
+
+
+def test_webhook_idempotency_key_propagates_action_index():
+    """Verifica que dos webhooks consecutivos en el mismo evento tengan Idempotency-Key diferenciada."""
+    ctx0 = build_context("/path/file.csv", event_type="created", event_id="evt-100", action_index=0)
+    ctx1 = build_context("/path/file.csv", event_type="created", event_id="evt-100", action_index=1)
+    assert ctx0["action_index"] == 0
+    assert ctx1["action_index"] == 1
+
+    with requests_mock.Mocker() as m:
+        m.post("https://api.empresa.com/wh", json={"ok": True})
+        action = WebhookAction(
+            url_template="https://api.empresa.com/wh",
+            allowed_domains=["empresa.com"],
+            allow_private_networks=True
+        )
+        action.execute(ctx0)
+        action.execute(ctx1)
+
+        history = m.request_history
+        assert len(history) == 2
+        assert history[0].headers["Idempotency-Key"] == "evt-100_0"
+        assert history[1].headers["Idempotency-Key"] == "evt-100_1"
+
+
+def test_webhook_ssrf_fail_closed_on_dns_failure():
+    """Verifica que dominios no resolubles fallen cerrado con ConnectionError cuando allow_private_networks=False."""
+    action = WebhookAction(url_template="https://dominio-inexistente-123456789.xyz/hook")
+    with pytest.raises(ConnectionError) as exc:
+        action.execute({"filepath": "dummy"})
+    assert "Bloqueo SSRF (Fail-Closed)" in str(exc.value)
+
+
+def test_strict_mode_validation():
+    """Verifica que strict_mode=True exija allowed_roots y allowed_webhook_domains."""
+    cfg_dict = {
+        "settings": {"strict_mode": True},
+        "watches": [{"path": "./inbox"}],
+        "rules": [{"name": "R", "actions": [{"type": "local_delete"}]}]
+    }
+    with pytest.raises(ValueError) as exc:
+        AutomatorConfig.model_validate(cfg_dict)
+    assert "strict_mode activado" in str(exc.value)
+

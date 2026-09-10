@@ -16,6 +16,7 @@ class SettingsConfig(BaseModel):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO", description="Nivel de logging")
 
     # Controles de seguridad
+    strict_mode: bool = Field(default=False, description="Exige configuración explícita de allowed_roots y dominios de webhook")
     allow_shell_commands: bool = Field(default=False, description="Permite el uso de shell=True en comandos")
     allowed_roots: Optional[List[str]] = Field(default=None, description="Lista de directorios raíz permitidos para operaciones de archivo")
     allowed_webhook_domains: Optional[List[str]] = Field(default=None, description="Allowlist de dominios permitidos para webhooks")
@@ -78,6 +79,27 @@ class AutomatorConfig(BaseModel):
     settings: SettingsConfig = Field(default_factory=SettingsConfig)
     watches: List[WatchConfig] = Field(default_factory=list)
     rules: List[RuleConfig] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_strict_security(self) -> AutomatorConfig:
+        if self.settings.strict_mode:
+            has_local_action = any(
+                a.type in ("local_move", "local_copy", "local_delete")
+                for r in self.rules
+                for a in r.actions
+            )
+            if has_local_action and not self.settings.allowed_roots:
+                raise ValueError("strict_mode activado: se requiere configurar 'allowed_roots' de forma explícita.")
+
+            has_webhook = any(
+                a.type == "webhook"
+                for r in self.rules
+                for a in r.actions
+            )
+            if has_webhook and not self.settings.allowed_webhook_domains:
+                raise ValueError("strict_mode activado: se requiere configurar 'allowed_webhook_domains' de forma explícita.")
+
+        return self
 
 
 def load_config(file_path: str | Path) -> AutomatorConfig:

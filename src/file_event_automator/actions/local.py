@@ -47,14 +47,21 @@ class LocalMoveAction(BaseAction):
         dest_str = interpolate_template(self.destination_template, context)
         dest = Path(dest_str).resolve()
 
-        # Si el destino es un directorio existente o termina en separador
+        # Determinar la ruta destino final y el directorio padre a crear antes de tocar el disco
         if dest.is_dir() or dest_str.endswith(("/", "\\")):
-            dest.mkdir(parents=True, exist_ok=True)
-            dest = dest / src.name
+            final_dest = dest / src.name
+            parent_to_create = dest
         else:
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            final_dest = dest
+            parent_to_create = dest.parent
 
-        _verify_path_jailing(dest, self.allowed_roots)
+        # 1. Validar jailing ANTES de cualquier creación de directorios
+        _verify_path_jailing(final_dest, self.allowed_roots)
+        _verify_path_jailing(parent_to_create, self.allowed_roots)
+
+        # 2. Crear directorios necesarios solo una vez validada la seguridad
+        parent_to_create.mkdir(parents=True, exist_ok=True)
+        dest = final_dest
 
         if dest.exists():
             if self.overwrite:
@@ -103,13 +110,21 @@ class LocalCopyAction(BaseAction):
         dest_str = interpolate_template(self.destination_template, context)
         dest = Path(dest_str).resolve()
 
+        # Determinar la ruta destino final y el directorio padre a crear antes de tocar el disco
         if dest.is_dir() or dest_str.endswith(("/", "\\")):
-            dest.mkdir(parents=True, exist_ok=True)
-            dest = dest / src.name
+            final_dest = dest / src.name
+            parent_to_create = dest
         else:
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            final_dest = dest
+            parent_to_create = dest.parent
 
-        _verify_path_jailing(dest, self.allowed_roots)
+        # 1. Validar jailing ANTES de cualquier creación de directorios
+        _verify_path_jailing(final_dest, self.allowed_roots)
+        _verify_path_jailing(parent_to_create, self.allowed_roots)
+
+        # 2. Crear directorios necesarios solo una vez validada la seguridad
+        parent_to_create.mkdir(parents=True, exist_ok=True)
+        dest = final_dest
 
         if dest.exists():
             if not self.overwrite:

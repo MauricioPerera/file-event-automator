@@ -12,6 +12,7 @@ def build_context(
     filepath: str,
     event_type: str = "created",
     event_id: str = "",
+    action_index: int = 0,
     src_path: Optional[str] = None
 ) -> Dict[str, Any]:
     path = Path(filepath)
@@ -37,6 +38,7 @@ def build_context(
         "filesize": filesize,
         "event_type": event_type,
         "event_id": event_id,
+        "action_index": action_index,
         "timestamp": now.strftime("%Y%m%d_%H%M%S"),
         "iso_timestamp": now.isoformat(),
     }
